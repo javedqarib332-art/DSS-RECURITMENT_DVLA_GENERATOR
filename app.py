@@ -3,7 +3,6 @@ import re
 import time
 import random
 import logging
-import threading
 import pandas as pd
 import gspread
 import streamlit as st
@@ -15,9 +14,16 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("DVLA_ROBOT")
 
 # --- CONFIG ---
+# Hugging Face par file ka naam wahi rakhein jo upload ki hai
+JSON_PATH = "credentials.json" 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1vO4Hs0FYu58dqzA-3MMr_Hpj10M-9RRsG5j0ZOxs1Yo/edit"
 DOWNLOAD_BASE = "downloads"
 os.makedirs(DOWNLOAD_BASE, exist_ok=True)
+
+# Playwright installation command for Hugging Face
+if 'playwright_installed' not in st.session_state:
+    os.system("playwright install chromium")
+    st.session_state['playwright_installed'] = True
 
 # ==========================================================
 # --- ORIGINAL FUNCTIONS (STRICTLY UNCHANGED) ---
@@ -100,15 +106,10 @@ class DVLARobot:
         finally:
             p2.close()
 
-# ==========================================================
-# --- UPDATED WRAPPER (FOR STREAMLIT SECRETS) ---
-# ==========================================================
 def run_automation(names_input, log_callback):
     try:
-        # File ke bajay Secrets se credentials uthayega taake 'Invalid JWT' error na aaye
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(
-            creds_dict,
+        creds = Credentials.from_service_account_file(
+            JSON_PATH,
             scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         )
         client = gspread.authorize(creds).open_by_url(SHEET_URL).sheet1
@@ -116,23 +117,21 @@ def run_automation(names_input, log_callback):
         log_callback(f"📊 Sheet Synced: {len(df)} records found.")
     except Exception as e:
         log_callback(f"CRITICAL: Sheet Access Denied: {e}")
-        return 0, [] # Return numbers instead of empty list to avoid Metric error
+        return 0, []
 
     names = [q.strip() for q in names_input.split(",")]
-    targets = df[df['Driver Name'].apply(
-        lambda x: any(name.lower() in x.lower() for name in names))].to_dict('records')
+    targets = df[df['Driver Name'].apply(lambda x: any(n.lower() in x.lower() for n in names))].to_dict('records')
 
     if not targets:
-        log_callback("⚠️ No driver found with those names.")
+        log_callback("⚠️ No driver found.")
         return 0, []
 
     failed_drivers = []
     success_count = 0
 
     with sync_playwright() as p:
-        # Cloud par headless auto-on ho jayega
-        is_cloud = os.getenv("STREAMLIT_RUNTIME_ENV") is not None
-        browser = p.chromium.launch(headless=is_cloud) 
+        # Hugging Face par hamesha headless=True hota hai
+        browser = p.chromium.launch(headless=True) 
         
         last_code_memory = ""
         for row in targets:
@@ -156,8 +155,7 @@ def run_automation(names_input, log_callback):
                 current_code = bot.solve_phase_1(p1, last_code_memory)
                 if current_code:
                     last_code_memory = current_code
-                    success = bot.solve_phase_2(row, current_code)
-                    if success:
+                    if bot.solve_phase_2(row, current_code):
                         success_count += 1
                         log_callback(f"✅ Success: {row['Driver Name']}")
                     else:
@@ -170,52 +168,17 @@ def run_automation(names_input, log_callback):
         browser.close()
     return success_count, failed_drivers
 
-# ==========================================================
 # --- STREAMLIT UI ---
-# ==========================================================
-st.set_page_config(page_title="DSS DVLA GENERATOR", layout="wide")
+st.set_page_config(page_title="DSS DVLA", layout="wide")
+st.title("DSS-RECRUITMENT DVLA GENERATOR")
 
-st.markdown("""
-    <style>
-    .stApp { background-color: #0f172a; color: #f1f5f9; }
-    .stTextArea textarea { background-color: #1e293b !important; color: white !important; border: 1px solid #334155 !important; }
-    .stButton>button { background: linear-gradient(90deg, #2563eb, #3b82f6); color: white; border-radius: 12px; font-weight: bold; width: 100%; }
-    </style>
-    """, unsafe_allow_html=True)
-
-st.markdown("<h1 style='text-align: center;'>DSS-RECRUITMENT <span style='color: #3b82f6;'>DVLA GENERATOR</span></h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center;'>Developed by <b>QARIB JAVED</b></p>", unsafe_allow_html=True)
-
-col1, col2 = st.columns([1, 2], gap="large")
-
-with col1:
-    st.markdown("### 📝 Target Drivers")
-    names_input = st.text_area("Enter names (comma separated)", placeholder="John Doe, Jane Smith...", height=250)
-    start_btn = st.button("START ENGINE")
-
-with col2:
-    st.markdown("### 🖥️ Live System Output")
-    log_placeholder = st.empty()
+names_in = st.text_area("Enter names", height=150)
+if st.button("START"):
+    log_area = st.empty()
+    all_logs = []
+    def upd(m):
+        all_logs.append(f"> {m}")
+        log_area.code("\n".join(all_logs))
     
-    if start_btn:
-        if not names_input:
-            st.error("Please enter names.")
-        else:
-            all_logs = ["> Engine starting..."]
-            def update_ui_logs(msg):
-                all_logs.append(f"> {msg}")
-                log_placeholder.code("\n".join(all_logs), language="bash")
-
-            success_count, failed_list = run_automation(names_input, update_ui_logs)
-            
-            st.divider()
-            st.markdown("### 📊 Processing Summary")
-            s_col, f_col = st.columns(2)
-            
-            # Metric fix: Ensures values are always numbers
-            s_col.metric("Successful", int(success_count) if success_count else 0)
-            f_col.metric("Rejected", len(failed_list) if failed_list else 0)
-            
-            if failed_list:
-                for f_name in failed_list:
-                    st.error(f"❌ {f_name}: Rejected or failed.")
+    s, f = run_automation(names_in, upd)
+    st.success(f"Done! Success: {s}")
