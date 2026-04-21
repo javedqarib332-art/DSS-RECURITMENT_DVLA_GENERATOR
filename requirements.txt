@@ -1,7 +1,5 @@
-flask
-flask-socketio
+streamlit
 pandas
 gspread
-playwright
 google-auth
-eventlet
+playwright
