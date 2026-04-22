@@ -43,11 +43,16 @@ SHEET_URL = "https://docs.google.com/spreadsheets/d/1vO4Hs0FYu58dqzA-3MMr_Hpj10M
 DOWNLOAD_BASE = "downloads"
 os.makedirs(DOWNLOAD_BASE, exist_ok=True)
 
-# --- GOOGLE AUTH HELPER ---
+# --- GOOGLE AUTH HELPER (FIXED FOR JWT ERROR) ---
 def get_gspread_client():
     try:
-        # Streamlit dashboard ke "Secrets" wale section se data uthayega
-        creds_info = st.secrets["gcp_service_account"]
+        # Secrets se data uthayega aur dictionary banayega
+        creds_info = dict(st.secrets["gcp_service_account"])
+        
+        # KEY FIX: Literal \n ko real newline character mein badalna
+        if "private_key" in creds_info:
+            creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
+        
         creds = Credentials.from_service_account_info(
             creds_info, 
             scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -57,7 +62,7 @@ def get_gspread_client():
         st.error(f"Authentication Error: {e}")
         return None
 
-# --- CORE LOGIC ---
+# --- CORE CLASSES (UNCHANGED) ---
 def retry(func, retries=3):
     for i in range(retries):
         try: return func()
@@ -125,7 +130,7 @@ col1, col2 = st.columns([1, 2], gap="large")
 with col1:
     st.markdown("### 📋 Configuration")
     names_input = st.text_area("Target Driver Names", placeholder="John Doe, Jane Smith...", height=200)
-    headless_mode = st.toggle("Headless Mode (Recommended for Cloud)", value=True)
+    headless_mode = st.toggle("Headless Mode (Silent Run)", value=True)
     start_btn = st.button("🚀 START ENGINE")
 
 with col2:
@@ -135,7 +140,6 @@ with col2:
 
     def update_ui_logs(msg):
         st.session_state.logs.append(f"[{time.strftime('%H:%M:%S')}] > {msg}")
-        # Show last 20 logs for better performance
         log_html = f"<div class='log-container'>{'<br>'.join(st.session_state.logs[::-1])}</div>"
         log_placeholder.markdown(log_html, unsafe_allow_html=True)
 
