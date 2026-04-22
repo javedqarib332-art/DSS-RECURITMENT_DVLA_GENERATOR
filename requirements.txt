@@ -1,5 +1,5 @@
 streamlit
+playwright
 pandas
 gspread
 google-auth
-playwright
