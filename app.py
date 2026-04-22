@@ -16,7 +16,7 @@ logger = logging.getLogger("DVLA_ROBOT")
 # --- UI CONFIG ---
 st.set_page_config(page_title="DSS-RECRUITMENT DVLA", page_icon="🏎️", layout="wide")
 
-# Custom CSS for Dark Premium Theme (Exactly like your HTML template)
+# Custom CSS for Dark Premium Theme
 st.markdown("""
     <style>
     .main { background-color: #0f172a; color: #f1f5f9; }
@@ -25,7 +25,7 @@ st.markdown("""
         background-color: #2563eb; color: white; border: none;
         font-weight: bold; transition: 0.3s;
     }
-    .stButton>button:hover { background-color: #3b82f6; border: none; }
+    .stButton>button:hover { background-color: #3b82f6; border: none; color: white; }
     .log-container {
         background-color: #00000066; border: 1px solid #334155;
         border-radius: 12px; padding: 15px; font-family: 'Fira Code', monospace;
@@ -38,14 +38,26 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- CONFIG (Updated for Cloud/Secrets) ---
-# Tip: GitHub pe credentials.json mat dalna, Streamlit Secrets use karna
-JSON_PATH = "credentials.json" 
+# --- CONFIG ---
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1vO4Hs0FYu58dqzA-3MMr_Hpj10M-9RRsG5j0ZOxs1Yo/edit"
 DOWNLOAD_BASE = "downloads"
 os.makedirs(DOWNLOAD_BASE, exist_ok=True)
 
-# --- CORE CLASSES (UNCHANGED) ---
+# --- GOOGLE AUTH HELPER ---
+def get_gspread_client():
+    try:
+        # Streamlit dashboard ke "Secrets" wale section se data uthayega
+        creds_info = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(
+            creds_info, 
+            scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        )
+        return gspread.authorize(creds).open_by_url(SHEET_URL).sheet1
+    except Exception as e:
+        st.error(f"Authentication Error: {e}")
+        return None
+
+# --- CORE LOGIC ---
 def retry(func, retries=3):
     for i in range(retries):
         try: return func()
@@ -100,7 +112,7 @@ class DVLARobot:
         except: return False
         finally: p2.close()
 
-# --- STREAMLIT UI LAYOUT ---
+# --- UI LAYOUT ---
 st.markdown("""
     <div style='border-bottom: 1px solid #334155; padding-bottom: 10px; margin-bottom: 25px;'>
         <h1 style='color: white; margin-bottom: 0;'>DSS-RECRUITMENT <span style='color: #3b82f6;'>DVLA GENERATOR</span></h1>
@@ -113,95 +125,89 @@ col1, col2 = st.columns([1, 2], gap="large")
 with col1:
     st.markdown("### 📋 Configuration")
     names_input = st.text_area("Target Driver Names", placeholder="John Doe, Jane Smith...", height=200)
-    
-    # Extra settings for Professional look
-    headless_mode = st.toggle("Headless Mode (Silent Run)", value=True)
+    headless_mode = st.toggle("Headless Mode (Recommended for Cloud)", value=True)
     start_btn = st.button("🚀 START ENGINE")
 
 with col2:
     st.markdown("### 📡 Live System Output")
     log_placeholder = st.empty()
-    logs_list = []
+    if 'logs' not in st.session_state: st.session_state.logs = []
 
     def update_ui_logs(msg):
-        logs_list.append(f"> {msg}")
-        log_html = f"<div class='log-container'>{'<br>'.join(logs_list[::-1])}</div>"
+        st.session_state.logs.append(f"[{time.strftime('%H:%M:%S')}] > {msg}")
+        # Show last 20 logs for better performance
+        log_html = f"<div class='log-container'>{'<br>'.join(st.session_state.logs[::-1])}</div>"
         log_placeholder.markdown(log_html, unsafe_allow_html=True)
 
-# --- AUTOMATION LOGIC ---
+# --- EXECUTION ---
 if start_btn:
     if not names_input:
         st.error("Please enter names first!")
     else:
-        try:
-            # Google Sheets Auth
-            creds = Credentials.from_service_account_file(JSON_PATH, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
-            client = gspread.authorize(creds).open_by_url(SHEET_URL).sheet1
-            df = pd.DataFrame(client.get_all_records()).fillna('')
-            update_ui_logs(f"📊 Sheet Synced: {len(df)} records found.")
+        client = get_gspread_client()
+        if client:
+            try:
+                df = pd.DataFrame(client.get_all_records()).fillna('')
+                update_ui_logs(f"📊 Sheet Synced: {len(df)} records found.")
 
-            names = [q.strip() for q in names_input.split(",")]
-            targets = df[df['Driver Name'].apply(lambda x: any(name.lower() in x.lower() for name in names))].to_dict('records')
+                names = [q.strip() for q in names_input.split(",")]
+                targets = df[df['Driver Name'].apply(lambda x: any(name.lower() in str(x).lower() for name in names))].to_dict('records')
 
-            if not targets:
-                update_ui_logs("⚠️ No driver found with those names.")
-            else:
-                success_count = 0
-                failed_drivers = []
-
-                with sync_playwright() as p:
-                    # Cloud deployment mein headless=True zaroori hai
-                    browser = p.chromium.launch(headless=headless_mode)
-                    last_code_memory = ""
-                    
+                if not targets:
+                    update_ui_logs("⚠️ No driver found with those names.")
+                else:
+                    success_count = 0
+                    failed_drivers = []
                     progress_bar = st.progress(0)
-                    for idx, row in enumerate(targets):
-                        update_ui_logs(f"Processing: {row['Driver Name']}")
+
+                    with sync_playwright() as p:
+                        browser = p.chromium.launch(headless=headless_mode)
+                        last_code_memory = ""
                         
-                        context = browser.new_context(accept_downloads=True, viewport={"width": 1280, "height": 720})
-                        bot = DVLARobot(context)
-                        p1 = context.new_page()
-                        
-                        try:
-                            p1.goto("https://www.viewdrivingrecord.service.gov.uk/driving-record/licence-number")
-                            p1.fill("#wizard_view_driving_licence_enter_details_driving_licence_number", str(row['licence number']))
-                            p1.fill("#wizard_view_driving_licence_enter_details_national_insurance_number", str(row['NIN Number']))
-                            p1.fill("#wizard_view_driving_licence_enter_details_post_code", str(row['Post code']))
-                            p1.locator("input[type='checkbox']").check()
-                            p1.click("#view-now")
+                        for idx, row in enumerate(targets):
+                            update_ui_logs(f"Processing: {row['Driver Name']}")
+                            context = browser.new_context(accept_downloads=True, viewport={"width": 1280, "height": 720})
+                            bot = DVLARobot(context)
+                            p1 = context.new_page()
                             
-                            current_code = bot.solve_phase_1(p1, last_code_memory)
-                            if current_code:
-                                last_code_memory = current_code
-                                if bot.solve_phase_2(row, current_code):
-                                    success_count += 1
-                                    update_ui_logs(f"✅ Success: {row['Driver Name']}")
-                                else: failed_drivers.append(row['Driver Name'])
-                            else: failed_drivers.append(row['Driver Name'])
-                        finally:
-                            p1.close()
-                            context.close()
-                        
-                        progress_bar.progress((idx + 1) / len(targets))
+                            try:
+                                p1.goto("https://www.viewdrivingrecord.service.gov.uk/driving-record/licence-number")
+                                p1.fill("#wizard_view_driving_licence_enter_details_driving_licence_number", str(row['licence number']))
+                                p1.fill("#wizard_view_driving_licence_enter_details_national_insurance_number", str(row['NIN Number']))
+                                p1.fill("#wizard_view_driving_licence_enter_details_post_code", str(row['Post code']))
+                                p1.locator("input[type='checkbox']").check()
+                                p1.click("#view-now")
+                                
+                                current_code = bot.solve_phase_1(p1, last_code_memory)
+                                if current_code:
+                                    last_code_memory = current_code
+                                    if bot.solve_phase_2(row, current_code):
+                                        success_count += 1
+                                        update_ui_logs(f"✅ Success: {row['Driver Name']}")
+                                    else: failed_drivers.append(row['Driver Name'])
+                                else:
+                                    update_ui_logs(f"❌ Code failed for: {row['Driver Name']}")
+                                    failed_drivers.append(row['Driver Name'])
+                            except Exception as e:
+                                update_ui_logs(f"🚨 Error with {row['Driver Name']}: {str(e)[:50]}...")
+                                failed_drivers.append(row['Driver Name'])
+                            finally:
+                                p1.close()
+                                context.close()
+                            
+                            progress_bar.progress((idx + 1) / len(targets))
+                        browser.close()
+
+                    # Final Summary
+                    st.markdown("---")
+                    s1, s2 = st.columns(2)
+                    with s1:
+                        st.markdown(f"<div class='stats-card' style='border-left: 5px solid #10b981;'><h4 style='color: #10b981; margin:0;'>SUCCESSFUL</h4><h2 style='color: white; margin:0;'>{success_count}</h2></div>", unsafe_allow_html=True)
+                    with s2:
+                        st.markdown(f"<div class='stats-card' style='border-left: 5px solid #ef4444;'><h4 style='color: #ef4444; margin:0;'>FAILED</h4><h2 style='color: white; margin:0;'>{len(failed_drivers)}</h2></div>", unsafe_allow_html=True)
                     
-                    browser.close()
+                    if failed_drivers:
+                        st.warning(f"Rechecked names: {', '.join(failed_drivers)}")
 
-                # --- FINAL SUMMARY ---
-                st.markdown("---")
-                s1, s2 = st.columns(2)
-                with s1:
-                    st.markdown(f"""<div class='stats-card' style='border-left: 5px solid #10b981;'>
-                        <h4 style='color: #10b981; margin:0;'>SUCCESSFUL</h4>
-                        <h2 style='color: white; margin:0;'>{success_count}</h2>
-                    </div>""", unsafe_allow_html=True)
-                with s2:
-                    st.markdown(f"""<div class='stats-card' style='border-left: 5px solid #ef4444;'>
-                        <h4 style='color: #ef4444; margin:0;'>FAILED</h4>
-                        <h2 style='color: white; margin:0;'>{len(failed_drivers)}</h2>
-                    </div>""", unsafe_allow_html=True)
-                
-                if failed_drivers:
-                    st.warning(f"Rechecked names: {', '.join(failed_drivers)}")
-
-        except Exception as e:
-            st.error(f"System Error: {e}")
+            except Exception as e:
+                st.error(f"Main Process Error: {e}")
